@@ -1,0 +1,527 @@
+---
+title: "Data analysis on PM2.5 in Beijing 2015"
+author: 
+- "Ben Yuan"
+
+output: 
+  html_document:
+    toc:  true
+    toc_float:  true
+    code_folding: hide
+---
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+###########################
+# STYLE EDITS: IGNORE THIS
+###########################
+knitr::opts_chunk$set(message = FALSE) # include this if you don't want markdown to knit messages
+knitr::opts_chunk$set(warning = FALSE) # include this if you don't want markdown to knit warnings
+knitr::opts_chunk$set(echo=TRUE) # set echo=FALSE to hide code from html output
+```
+
+```{r}
+###########################
+# PUT YOUR LIBRARIES HERE
+###########################
+library(ggplot2)
+library(tidyverse)
+library(pander)
+library(kableExtra)
+library(knitr)
+library(gridExtra)
+library(MASS)
+library(ggseas)
+library(corrplot)
+```
+
+#  Introduction
+
++ **Background** PM2.5 readings are often included in air quality reports from environmental authorities and companies. PM2.5 refers to atmospheric particulate matter (PM) that have a diameter less than 2.5 micrometers. In other words, it's used as a measure of pollution. The higher the PM2.5 readings, the worse the air quality it indicates. 
+
++ **Motivation** In the past decades, China has been quickly industrializing. Industrialization facilitates Chinese economy, but at the same time it increases China's fossil energy consumption. What follows from massive energy consumption is massive pollution discharge. Pollution not only threatens people's health but also brings many environmental problems which are especially severe in big cities like Beijing. Since PM2.5 is an important indicator for the severity of pollution, studying PM2.5 in Beijing and factors that affect PM2.5 can provide guidance for preventing and controlling air pollution in China. 
+
+### Data
+```{r, echo=TRUE}
+# LOAD IN DATA FROM LOCAL FILE
+beijing <- read_csv("BeijingPM20100101_20151231.csv")
+
+# Clean out NULLs in the data
+beijing$PM_Dongsi = NULL
+beijing$PM_Dongsihuan = NULL
+beijing$PM_Nongzhanguan = NULL
+beijing = na.omit(beijing)
+
+# Add categorical variables
+beijing <- mutate(beijing,
+                  rain = ifelse(beijing$precipitation == 0, "No", "Yes"),
+                  wind = ifelse(beijing$Iws < 20, "small", "big"),
+                  humid = ifelse(beijing$HUMI > 80, "high", "low"),
+                  pressure = ifelse(beijing$PRES > 1013, "high", "low"),
+                  temperature = ifelse(beijing$TEMP > 30, "high", "low"))
+
+
+# Convert date into standard format in R
+reform <- function(str) {
+  if(nchar(str) == 1) {
+    return (paste("0", str, sep = ""))
+  }
+  else {
+    return (str)
+  }
+}
+
+convertdata <- function(dat) {
+  year = as.character(dat$year)
+  month = unlist(lapply(FUN = reform, as.character(dat$month)))
+  day = unlist(lapply(FUN = reform, as.character(dat$day)))
+  result = paste(year, month, day, sep = "-")
+  return (result)
+}
+date = convertdata(beijing)
+beijing$date = as.Date(date)
+
+
+colnames(beijing)[7] = "PM2.5"
+
+# Extracting the data in 2015
+beijing2015 <- beijing[beijing$year == 2015,]
+dayavg2015 <- beijing2015 %>%
+  group_by(date) %>%
+  dplyr::summarise(dayavg = as.numeric(round(sum(PM2.5)/n(), 2)),
+                   rainavg = as.numeric(round(sum(precipitation), 2)),
+                   windavg = as.numeric(round(sum(Iws)/n(), 2)),
+                   humidavg = as.numeric(round(sum(HUMI)/n(), 2)),
+                   pressureavg = as.numeric(round(sum(PRES)/n(), 2)),
+                   temperatureavg = max(TEMP),
+                   season = min(season)) 
+
+dayavg2015 <- mutate(dayavg2015,
+                  rain = ifelse(dayavg2015$rainavg == 0, "No", "Yes"),
+                  wind = ifelse(dayavg2015$windavg < mean(dayavg2015$windavg), "small", "big"),
+                  humid = ifelse(dayavg2015$humidavg > 80, "high", "low"),
+                  pressure = ifelse(dayavg2015$pressureavg > 1013, "high", "low"),
+                  temperature = ifelse(dayavg2015$temperatureavg > 30, "high", "low"))
+
+dayavg2015$season <- fct_recode(as.factor(dayavg2015$season), 
+                                "Spring" = "1",
+                                "Summer" = "2",
+                                "Fall" = "3",
+                                "Winter" = "4")
+
+cormat <- dayavg2015[, c("dayavg", "rainavg", "windavg", "humidavg", "pressureavg")]
+names(cormat) = c("PM2.5", "Rain", "Wind", "Humidity", "Pressure")
+
+eda <- dayavg2015[, !(names(dayavg2015) %in% c("temperatureavg", "temperature"))]
+addquality <- function(pm) {
+  qua = pm
+  for(i in 1:length(pm)) {
+    if(pm[i] >=0 && pm[i] <= 35) {
+      qua[i] = "Good"
+    }
+    else if(pm[i] > 35 && pm[i] <= 75) {
+      qua[i] = "Acceptable"
+    }
+    else if(pm[i] > 75 && pm[i] <= 115) {
+      qua[i] = "Slight Pollution"
+    }
+    else if(pm[i] > 115 && pm[i] <= 150) {
+      qua[i] = "Moderate Pollution"
+    }
+    else if(pm[i] > 150 && pm[i] <= 250) {
+      qua[i] = "Heavy Pollution"
+    }
+    else {
+      qua[i] = "Extreme Pollution"
+    }
+  }
+  return (qua)
+}
+
+beijing2015$quality = addquality(beijing2015$PM2.5)
+
+eda$quality = addquality(eda$dayavg)
+
+eda$quality <- fct_relevel(as.factor(eda$quality),
+                           "Good", "Acceptable", "Slight Pollution",
+                           "Moderate Pollution", "Heavy Pollution",
+                           "Extreme Pollution")
+
+
+addwindirc = function(dat) {
+  result = 1:nrow(dat)
+  winds = colnames(dat)[-1]
+  for(i in 1:nrow(dat)) {
+    todaymax = max(dat[i, -1])
+    today = winds[which(dat[i, -1] == todaymax)]
+    result[i] = today
+  }
+  return(result)
+}
+
+tempwind = beijing2015[, c("date", "cbwd")] %>%
+  group_by(date) %>%
+  dplyr::summarise(NW = sum(cbwd == "NW"),
+                   NE = sum(cbwd == "NE"),
+                   SE = sum(cbwd == "SE"),
+                   SW = sum(cbwd == "SW"),
+                   CV = sum(cbwd == "cv"))
+
+
+
+eda$winddirection = addwindirc(tempwind)
+eda$winddirection <- fct_relevel(as.factor(eda$winddirection),
+                                 "NW", "NE", "SW", "SE")
+
+pander(head(eda, 5))
+```
+
++ **Description** There are 346 observations and 13 variables in this data set. `date`, `season`, and `winddirection` are self-explanatory. `dayavg` is the mean PM2.5 per day. From `rainavg` to `pressureavg` are the mean values of measurements on these weather conditions. From `rain` to `pressure` are categorical variables created from the corresponding continuous variables that give each of them a description. `quality` describes air quality given PM2.5.
+
++ **Additional Remarks**
+    + **`rain`**  
+        + Yes: `rainavg` > 0
+        + No: `rainavg` = 0
+    + **`wind`**  
+        + small: `windavg` < mean(`windavg`)
+        + big : `windavg` >= mean(`windavg`)
+    + **`humid`** (humidity above 80% makes people very uncomfortable)
+        + high: `humidavg` > 80
+        + low: `humidavg` <= 80
+    + **`pressure`** (1013 is 1 standard atmospheric pressure)
+        + high: `pressureavg` > 1013
+        + low: `pressureavg` <= 1013
+    + **`quality`** (standard by China National Environmental Monitoring Center)
+        + Good: [0, 35]
+        + Acceptable: (35, 75]
+        + Slight Pollution: (75, 115]
+        + Moderate Pollution: (115, 150]
+        + Heavy Pollution: (150, 250]
+        + Extreme Pollution: > 250
+    
+
+### Goals
+
+I  am trying to first explore the seasonal trend of PM2.5 in a year. Secondly, I am trying to explore what weather conditions affect PM2.5 and how they affect them. Last, I will try to explore how human activities affect PM2.5. My hypothesis is that 1) there is a seasonal trend of PM2.5 in a year, 2) Wind, rain, humidity, and pressure affect PM2.5, and 3) human activities do affect PM2.5.
+
+
+### Exploring the variables
+
+```{r}
+g1 <- ggplot(data = eda, aes(x = dayavg)) + 
+        geom_histogram(binwidth = 50, alpha = 0.5, color = "black") +
+        labs(x = "Mean PM2.5 per day (ug/m^3)",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of Mean PM2.5 per day")
+        
+
+g2 <- ggplot(data = eda, aes(x = quality, fill = quality)) +
+        geom_bar(show.legend = FALSE, alpha = 0.5, color = "black") +
+        labs(x = "Air Quality",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of Air Quality")
+
+gwind <- ggplot(data = eda, aes(x = winddirection, fill = winddirection)) + 
+        geom_bar(show.legend = FALSE, alpha = 0.5, color = "black") +
+        labs(x = "wind direction",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of wind direction")
+
+grid.arrange(g1, g2, gwind, ncol = 1)
+```
+
++ **Distribution of Mean PM2.5 per day**
+    + In most days in 2015, PM2.5 in Beijing exceeds 50. The distribution is skew to the right.
+
++ **Distribution of Air quality**
+    + The air quality in Beijing is not very good. In 182 days in 2015, the air in Beijing is polluted.
+    
++ **Distribution of wind direction**
+    + Winds are mostly north-west(NW) or south-east(SE). A small proportion of them are north-east(NE) or stationary(CV).
+    
+```{r}
+g3 <- ggplot(data = eda, aes(x = rainavg)) + 
+        geom_histogram(binwidth = 2, alpha = 0.5, color = "black") +
+        labs(x = "Mean cumulative rain per day (mm)",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of Mean cumulative rain per day") +
+        theme(title = element_text(size = 8)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8))
+
+g4 <- ggplot(data = eda, aes(x = windavg)) + 
+        geom_histogram(binwidth = 20, alpha = 0.5, color = "black") +
+        labs(x = "Mean cumulative wind \nspeed per day (m/s)",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of Mean cumulative wind speed per day") +
+        theme(title = element_text(size = 7.5)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8))
+
+g5 <- ggplot(data = eda, aes(x = humidavg)) + 
+        geom_histogram(binwidth = 10, alpha = 0.5, color = "black") +
+        labs(x = "Mean humidity per day (%)",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of Mean humidity per day") +
+        theme(title = element_text(size = 8)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8))
+
+g6 <- ggplot(data = eda, aes(x = pressureavg)) + 
+        geom_histogram(binwidth = 10, alpha = 0.5, color = "black") +
+        labs(x = "Mean pressure per day (hPa)",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of Mean pressure per day") +
+        theme(title = element_text(size = 8)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8))
+
+
+      
+grid.arrange(g3, g4, g5, g6, ncol = 2)
+```
+
++ **Distribution of Mean cumulative rain per day**
+    + In most days in 2015, the cumulative rain is 0 or almost 0. The distribution is strongly skew to the right.
+    
++ **Distribution of Mean cumulative wind speed per day**
+    + In most days in 2015, the cumulative wind speed is less than 40. The distribution is skew to the right.
+
++ **Distribution of Mean humidity per day**
+    + The distribution is centered around 60 and slightly skew to the left.
+    
++ **Distribution of Mean pressure per day**
+    + The distribution is centered around 1010 and skew to the left.
+
+
+```{r}
+g7 <- ggplot(data = eda, aes(x = rain, fill = rain)) + 
+        geom_bar(show.legend = FALSE, alpha = 0.5, color = "black") +
+        labs(x = "rain",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of rain") +
+        theme(title = element_text(size = 8)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8)) +
+        theme(legend.justification = c(1, 1), legend.position = c(1, 1)) +
+        theme(legend.title = element_text(size = 6)) +
+        theme(legend.text = element_text(size = 5)) +
+        theme(legend.key.size = unit(0.1,"line"),
+              legend.key = element_rect(fill = "transparent", colour = "transparent"))
+  
+
+g8 <- ggplot(data = eda, aes(x = wind, fill = wind)) + 
+        geom_bar(show.legend = FALSE, alpha = 0.5, color = "black") +
+        labs(x = "wind",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of wind") +
+        theme(title = element_text(size = 8)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8)) +
+        theme(legend.justification = c(1, 1), legend.position = c(1, 1)) +
+        theme(legend.title = element_text(size = 6)) +
+        theme(legend.text = element_text(size = 5)) +
+        theme(legend.key.size = unit(0.1,"line"),
+              legend.key = element_rect(fill = "transparent", colour = "transparent"))
+
+g9 <- ggplot(data = eda, aes(x = humid, fill = humid)) + 
+        geom_bar(show.legend = FALSE, alpha = 0.5, color = "black") +
+        labs(x = "humidity",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of humidity") +
+        theme(title = element_text(size = 8)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8)) +
+        theme(legend.justification = c(1, 1), legend.position = c(1, 1)) +
+        theme(legend.title = element_text(size = 6)) +
+        theme(legend.text = element_text(size = 5)) +
+        theme(legend.key.size = unit(0.1,"line"),
+              legend.key = element_rect(fill = "transparent", colour = "transparent"))
+
+g10 <- ggplot(data = eda, aes(x = pressure, fill = pressure)) + 
+        geom_bar(show.legend = FALSE, alpha = 0.5, color = "black") +
+        labs(x = "pressure",
+             caption = "raw data from UCI Machine Learning",
+             title = "Distribution of pressure") +
+        theme(title = element_text(size = 8)) +
+        theme(axis.text.x = element_text(size = 8)) +
+        theme(axis.title.x = element_text(size = 8)) +
+        theme(axis.text.y = element_text(size = 8)) +
+        theme(axis.title.y = element_text(size = 8)) +
+        theme(plot.caption = element_text(size = 8)) +
+        theme(legend.justification = c(1, 1), legend.position = c(1, 1)) +
+        theme(legend.title = element_text(size = 6)) +
+        theme(legend.text = element_text(size = 5)) +
+        theme(legend.key.size = unit(0.1,"line"),
+              legend.key = element_rect(fill = "transparent", colour = "transparent"))
+
+grid.arrange(g7, g8, g9, g10, ncol = 2)
+```
+
++ **Distribution of rain**
+    + The number of days that did not rain is almost four times the number of days that rained.
+    
++ **Distribution of wind**
+    + The number of days with small wind is about three times the number of days with big wind.
+    
++ **Distribution of humidity**
+    + The number of days with low humidity is about five times the number of days with high humidity.
+    
++ **Distribution of pressure**
+    + The number of days with high pressure is about 50 more than the number of days with low pressure.
+
+
+
+# Methods
+
+```{r}
+ggplot(data = filter(eda, date < "2015-12-01"), aes(x = date, y = dayavg, color = as.factor(season))) +
+  geom_line() +
+  geom_line(data = filter(eda, date >= "2015-12-01")) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = "PM2.5",
+       title = "Variation of average PM2.5 per day in 2015",
+       color = "season",
+       caption = "raw data from UCI Machine Learning") +
+  stat_rollapplyr(data = eda, width = 30, align = "right", size = 2, alpha=.7, color = "red")
+```
+
+From this time series, we can see that PM2.5 fluctuates a lot in 2015. Most of the high peaks occur on the sides. This suggests that most of the severe pollution occur in winter. We can also see from the moving window averages (bold red line) that PM2.5 in summer seems less than that in winter on average. But in early fall, we noticed a significant decrease in PM2.5. This seems interestingly odd. But I will get back to this later. Now, let's examine if there is a significant difference in average PM2.5 between different seasons. 
+
+```{r}
+seasonal <- eda %>%
+  group_by(season) %>%
+  dplyr::summarise(count = n(),
+                   mean = mean(dayavg),
+                   std_dev = sd(dayavg)) %>% 
+  mutate(std_error = std_dev / sqrt(count), 
+         lower = mean - 1.96 * std_error,  
+         upper = mean + 1.96 * std_error) 
+
+
+g11 <- ggplot(data = seasonal, aes(x = season, y = mean, fill = season)) +
+        geom_bar(stat = "identity", show.legend = FALSE, alpha = 0.5, color = "black") +
+        geom_errorbar(aes(ymin = lower, ymax = upper)) +
+        labs(x = "Season",
+             y = "Mean PM2.5",
+             caption = "raw data from UCI Machine Learning",
+             title = "Mean PM2.5 by seasons")
+g11
+```
+
+This is the mean PM2.5 by seasons plot with errors bars at the confidence level of 95%. From the graph, we can see that winter has the highest mean and has no overlap with other seasons. Summer has the lowest mean and has no overlap with other seasons except a slight overlap with fall. This suggests that there is a significant difference in average PM2.5 between different seasons. But why is this the case? Well, distinction between seasons is the change of weather conditions. Thus, it must be weather conditions that account for this difference. So, let's first explore how weather conditions change from seasons to seasons in Beijing. Since the difference in average PM2.5 is most significant between summer and winter, we will focus on comparing summer and winter.
+
+```{r}
+g13 <- ggplot(eda, aes(x = season, fill = rain)) +
+        geom_bar(position = "fill") +
+        labs(title = "Rain by seasons")
+
+g14 <- ggplot(eda, aes(x = season, fill = wind)) +
+        geom_bar(position = "fill") +
+        labs(title = "Wind by seasons")
+
+# swmean = eda %>%
+#   group_by(season) %>%
+#   dplyr::summarise(humiditymean = mean(humidavg),
+#                    pressuremean = mean(pressureavg))
+# 
+# shmean = swmean[2, "humiditymean"]
+# whmean = swmean[4, "humiditymean"]
+# 
+# spmean = swmean[2, "pressuremean"]
+# wpmean = swmean[4, "pressuremean"]
+
+# shmean = 64.9
+# whmean = 50
+# spmean = 1006
+# wpmean = 1027
+
+
+g15 <- ggplot(eda, aes(x = humidavg, color = season)) +
+        geom_density() + 
+        geom_vline(xintercept = 64.9, linetype="dotted", 
+                color = "green", size=1) +
+        geom_vline(xintercept = 50, linetype="dotted", 
+                color = "purple", size=1) +
+        labs(x = "humidity (%)",
+             title = "Humidity distribution by seasons")
+
+g16 <- ggplot(eda, aes(x = pressureavg, color = season)) +
+        geom_density() + 
+        geom_vline(xintercept = 1006, linetype="dotted", 
+                color = "green", size=1) +
+        geom_vline(xintercept = 1027, linetype="dotted", 
+                color = "purple", size=1) +
+        labs(title = "Pressure distribution by seasons",
+             x = "pressure (hPa)")
+
+grid.arrange(g13, g14, g15, g16, ncol = 2)
+```
+
+From "Rain by seasons", we can see that it rains more in summer and less in winter. In fact in winter, it rains the least. From "Wind by seasons", we can see that winter is more windy than summer. From "Humidity distribution by seasons", we can see that summer is more humid than winter. From "Pressure distribution by seasons", we can see that winter has the highest pressure and summer has the least. Since we know the difference in weather conditions between summer and winter, let's now examine how these weather conditions affect PM2.5.   
+
+```{r}
+corrplot.mixed(cor(cormat), tl.col="black", tl.cex = 1, title = "Correlation between PM2.5 and Rain, Wind, Humidity, Pressure", mar=c(0,0,1,0)) 
+```
+
+From the correlation matrix, we can see that there is a negative correlation between PM2.5 and rain. This is because rain rinses air and brings tiny pollutants down. Thus, the bigger the rain the more pollutants it brings down and hence the lower the PM2.5. There is a negative correlation between PM2.5 and wind. This is because wind blows pollutants away. Thus, the bigger the wind, the more pollutants it blows away, and hence the lower the PM2.5. There is a positive correlation between PM2.5 and humidity. This is because higher humidity means thicker and more viscose air which is more able to hold tiny pollutants. Thus, the higher the humidity the more pollutants present, and hence the higher the PM2.5. There is a positive correlation between PM2.5 and pressure. This is because higher pressure makes air and pollutants more stationary. Thus, the higher the pressure the more pollutants present, and hence the higher the PM2.5.
+
+Now let's explore the last weather condition variable in this data set, `winddirection`.
+
+```{r}
+g12 <- ggplot(data = eda, aes(x = winddirection, y = , fill = winddirection))+
+        geom_bar() + facet_wrap(~quality) +
+        labs(title = "Distribution of wind direction given air quality")
+
+g12
+```
+
+From the graph, we can see that most days that have NW wind have good or acceptable air quality. We can also see that most days that have NE wind have good or acceptable air quality. And among the days that are polluted, there are not many of them with NW or NE wind compared with southerly wind. Thus, it seems that northerly wind is in favor of reducing PM2.5. Now that we've explored all weather conditions, let's go back to explore the abnormal observation we made in early fall.   
+
+```{r}
+knitr::include_graphics("yuebing.png")
+```
+
+It turns out that on September 3, 2015, China held a massive military parade in Tian'anmen Square to commemorate the 70 years anniversary of World War 2 victory. In order to prepare for that parade, the Chinese government shut down many factories in Beijing and those near Beijing temporarily to ensure the good quality of air. That explains the significant decrease of PM2.5 in the early fall of 2015. Thus, human activities do affect PM2.5 and it seems that it is the most important factor above all weather conditions.
+
+
+
+
+
+
+
+
+
+
+
+# Results
+
+From the analysis above, we can see that PM2.5 is the lowest in summer and the highest in winter. This difference is due to the change in weather conditions between summer and winter. Among the weather conditions variables, rain and wind have a negative correlation with PM2.5;  humidity and pressure have a positive correlation with PM2.5, and it seems that northerly wind is in favor of reducing PM2.5. Additionally, human activities do affect PM2.5 and it is the most important factor above all weather conditions. My analysis confirms my hypothesis.
+
+
+
+# Discussion
+
+I would like to know how much pollutants are produced in Beijing everyday to study how human activities affect PM2.5
+quantitatively. I would also like to know the locations of factories in Beijing which would help me better understand why northerly wind is in favor of reducing PM2.5. The limitation of my data is that it covers only the year 2015 and the city of Beijing. It would be better to use dataset that covers a longer span of time and contains data on more cities. The limitation of my analysis is that I did not use more sophisticated data analysis method to analyze the interaction of different weather variables on PM2.5.  
